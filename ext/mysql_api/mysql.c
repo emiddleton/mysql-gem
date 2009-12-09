@@ -76,7 +76,7 @@ static const char * const (enc_mysql2ruby_mapping[][2]) = {
 	    {"ujis",          "EUC-JP"       },
 	    {"sjis",          "Shift_JIS"    },
 	    {"hebrew",        "ISO-8859-8"   },
-	    /*{"tis620",        ""           },*/
+	    {"tis620",        "TIS-620"      },
 	    {"euckr",         "EUC-KR"       },
 	    {"koi8u",         "KOI8-U"       },
 	    {"gb2312",        "GB2312"       },
@@ -86,7 +86,7 @@ static const char * const (enc_mysql2ruby_mapping[][2]) = {
 	    {"latin5",        "ISO-8859-9"   },
 	    /*{"armscii8",      ""           },*/
 	    {"utf8",          "UTF-8"        },
-	    /*{"ucs2",          "" },*/
+	    {"ucs2",          "UTF-16LE" },
 	    {"cp866",         "IBM866"       },
 	    /*{"keybcs2",       ""           },*/
 	    /*{"macce",         ""           },*/
@@ -96,10 +96,22 @@ static const char * const (enc_mysql2ruby_mapping[][2]) = {
 	    {"cp1251",        "Windows-1251" },
 	    {"cp1256",        "Windows-1256" },
 	    {"cp1257",        "Windows-1257" },
-	    /*{"binary",        "" },*/
+	    {"binary",        "ASCII-8BIT" },
 	    /*{"geostd8",       "" },*/
-	    {"cp932",         "Windows-31J"  }/*,
-	    {"eucjpms",       ""}*/
+	    {"cp932",         "Windows-31J"  },
+	    {"eucjpms",       "eucJP-ms"}
+};
+
+/*                                             mysql:       aliases ... */
+static const char *const dec8_aliases[]     = {"dec8",     "DEC-MCS", "dec", "csDECMCS"};
+static const char *const hp8_aliases[]      = {"hp8",      "hp-roman8", "roman8", "r8", "csHPRoman8"};
+static const char *const armscii8_aliases[] = {"armscii8", "ArmSCII-8"};
+static const char *const keybcs_aliases[]   = {"keybcs2",  "KEY-BCS2", "CP895", "Kamenicky"};
+static const char *const macce_aliases[]    = {"macce",    "MACCE"};
+static const char *const geostd_aliases[]   = {"geostd8",  "GEOSTD8"};
+static const char *const *const known_but_not_supported_encs[] = {
+    dec8_aliases, hp8_aliases,  /* swe7 is not ASCII-compatible */
+    armscii8_aliases, keybcs_aliases, macce_aliases, geostd_aliases
 };
 
 /*
@@ -120,21 +132,29 @@ static int enc_get_index(VALUE val)
 extern int rb_enc_alias(const char *alias, const char *orig); /* declaration missing in Ruby 1.9.1 */
 
 static rb_encoding *
-find_or_create_johab(void)
+find_or_create_unsupported_encoding(const char *const *const aliases)
 {
-	static const char * const aliases[] = { "JOHAB", "Windows-1361", "CP1361" };
-	int enc_index;
-	int i;
-	for (i = 0; i < sizeof(aliases)/sizeof(aliases[0]); ++i) {
-		enc_index = rb_enc_find_index(aliases[i]);
-		if (enc_index > 0) return rb_enc_from_index(enc_index);
-	}
+    int enc_index;
+    int i;
+    for (i = 0; i < sizeof(aliases)/sizeof(aliases[0]); ++i) {
+	enc_index = rb_enc_find_index(aliases[i]);
+	if (enc_index > 0) return rb_enc_from_index(enc_index);
+    }
 
-	enc_index = rb_define_dummy_encoding(aliases[0]);
-	for (i = 1; i < sizeof(aliases)/sizeof(aliases[0]); ++i) {
-		rb_enc_alias(aliases[i], aliases[0]);
-	}
-	return rb_enc_from_index(enc_index);
+    enc_index = rb_enc_replicate(aliases[0], rb_ascii8bit_encoding());
+    for (i = 1; i < sizeof(aliases)/sizeof(aliases[0]); ++i) {
+	rb_enc_alias(aliases[i], aliases[0]);
+    }
+    return rb_enc_from_index(enc_index);
+}
+
+static rb_encoding *
+find_or_create_swe7(void)
+{
+    int enc_index;
+    enc_index = rb_enc_find_index("swe7");
+    if (enc_index == 0) enc_index = rb_define_dummy_encoding("swe7");
+    return rb_enc_from_index(enc_index);
 }
 
 /*
@@ -143,38 +163,41 @@ find_or_create_johab(void)
  * * returns NULL if the client encoding is 'SQL_ASCII'.
  * * returns ASCII-8BIT if the client encoding is unknown.
  */
-static rb_encoding *
-get_client_encoding_as_rb_encoding(MYSQL * m)
+rb_encoding *
+get_connection_encoding_as_rb_encoding(MYSQL * m)
 {
-	rb_encoding *enc;
-	const char* name = mysql_character_set_name(m);
-	if (st_lookup(enc_mysql2ruby, (st_data_t)name, (st_data_t*)&enc)) {
-		return enc;
-	}
-	else {
-		int i;
-		if (strcmp("SQL_ASCII", name) == 0) {
-			enc = NULL;
-			goto cache;
-		}
-		for (i = 0; i < sizeof(enc_mysql2ruby_mapping)/sizeof(enc_mysql2ruby_mapping[0]); ++i) {
-			if (strcmp(name, enc_mysql2ruby_mapping[i][0]) == 0) {
-				enc = rb_enc_find(enc_mysql2ruby_mapping[i][1]);
-				goto cache;
-			}
-		}
-
-		/* Ruby 1.9.1 does not supoort JOHAB */
-		if (strcmp(name, "JOHAB") == 0) {
-			enc = find_or_create_johab();
-			goto cache;
-		}
-
-		enc = rb_ascii8bit_encoding();
-	}
-cache:
-	st_insert(enc_mysql2ruby, (st_data_t)name, (st_data_t)enc);
+    rb_encoding *enc;
+    const char* name = mysql_character_set_name(m);
+    if (st_lookup(enc_mysql2ruby, (st_data_t)name, (st_data_t*)&enc)) {
 	return enc;
+    }
+    else {
+	int i;
+	for (i = 0; i < sizeof(enc_mysql2ruby_mapping)/sizeof(enc_mysql2ruby_mapping[0]); ++i) {
+	    if (strcmp(name, enc_mysql2ruby_mapping[i][0]) == 0) {
+		enc = rb_enc_find(enc_mysql2ruby_mapping[i][1]);
+		goto cache;
+	    }
+	}
+
+	/* Ruby 1.9.1 does not supoort some encodings */
+	for (i = 0; i < sizeof(known_but_not_supported_encs)/sizeof(known_but_not_supported_encs[0]); ++i) {
+	    if (strcmp(name, known_but_not_supported_encs[i][0]) == 0) {
+		enc = find_or_create_unsupported_encoding(&known_but_not_supported_encs[i][1]);
+		goto cache;
+	    }
+	}
+
+	if (strcmp(name, "swe7") == 0) {
+	    enc = find_or_create_swe7();
+	    goto cache;
+	}
+
+	enc = rb_ascii8bit_encoding();
+    }
+cache:
+    st_insert(enc_mysql2ruby, (st_data_t)name, (st_data_t)enc);
+    return enc;
 }
 
 #endif
@@ -212,7 +235,7 @@ struct mysql_stmt {
 
 #ifdef M17N_SUPPORTED
 # define ASSOCIATE_INDEX(obj, index_holder) rb_enc_associate_index((obj), enc_get_index((index_holder)))
-static rb_encoding * get_client_encoding_as_rb_encoding(MYSQL* m);
+rb_encoding * get_connection_encoding_as_rb_encoding(MYSQL* m);
 static int enc_get_index(VALUE val);
 #else
 # define ASSOCIATE_INDEX(obj, index_holder) /* nothing */
@@ -322,7 +345,7 @@ static VALUE mysqlres2obj(MYSQL_RES* res, VALUE conn)
     rb_encoding *enc;
     obj = Data_Make_Struct(cMysqlRes, struct mysql_res, 0, free_mysqlres, resp);
     MYSQL* m = GetHandler(conn);
-    enc = get_client_encoding_as_rb_encoding(m);
+    enc = get_connection_encoding_as_rb_encoding(m);
     rb_enc_set_index(obj, rb_enc_to_index(enc));
 #else
     obj = Data_Make_Struct(cMysqlRes, struct mysql_res, 0, free_mysqlres, resp);
@@ -365,7 +388,6 @@ static VALUE init(VALUE klass)
 {
     struct mysql* myp;
     VALUE obj;
-
     obj = Data_Make_Struct(klass, struct mysql, 0, free_mysql, myp);
     mysql_init(&myp->handler);
     myp->connection = Qfalse;
@@ -587,6 +609,10 @@ static VALUE real_escape_string(VALUE obj, VALUE str)
 /*	initialize()	*/
 static VALUE initialize(int argc, VALUE* argv, VALUE obj)
 {
+#ifdef M17N_SUPPORTED
+    rb_encoding *enc = get_connection_encoding_as_rb_encoding(GetHandler(obj));
+    rb_enc_set_index(obj, rb_enc_to_index(enc));
+#endif
     return obj;
 }
 
@@ -2077,6 +2103,11 @@ static VALUE error_sqlstate(VALUE obj)
 
 void Init_mysql_api(void)
 {
+#ifdef M17N_SUPPORTED
+    enc_mysql2ruby = st_init_strtable();
+    s_id_index = rb_intern("@encoding");
+#endif
+
     cMysql = rb_define_class("Mysql", rb_cObject);
     cMysqlRes = rb_define_class_under(cMysql, "Result", rb_cObject);
     cMysqlField = rb_define_class_under(cMysql, "Field", rb_cObject);
@@ -2296,10 +2327,6 @@ void Init_mysql_api(void)
 #if MYSQL_VERSION_ID >= 40101
     rb_define_const(cMysql, "OPTION_MULTI_STATEMENTS_ON", INT2NUM(MYSQL_OPTION_MULTI_STATEMENTS_ON));
     rb_define_const(cMysql, "OPTION_MULTI_STATEMENTS_OFF", INT2NUM(MYSQL_OPTION_MULTI_STATEMENTS_OFF));
-#endif
-#ifdef M17N_SUPPORTED
-    enc_mysql2ruby = st_init_strtable();
-    s_id_index = rb_intern("@encoding");
 #endif
 
     /* Mysql::Result object method */
