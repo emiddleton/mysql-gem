@@ -215,6 +215,7 @@ struct mysql_res {
 
 #if MYSQL_VERSION_ID >= 40101
 struct mysql_stmt {
+    MYSQL *handler;
     MYSQL_STMT *stmt;
     char closed;
     struct {
@@ -1080,6 +1081,7 @@ static VALUE stmt_init(VALUE obj)
 	rb_raise(rb_eArgError, "mysql_stmt_attr_set() failed");
     st_obj = Data_Make_Struct(cMysqlStmt, struct mysql_stmt, 0, free_mysqlstmt, stmt);
     memset(stmt, 0, sizeof(*stmt));
+    stmt->handler = m;
     stmt->stmt = s;
     stmt->closed = Qfalse;
     return st_obj;
@@ -1920,18 +1922,36 @@ static VALUE stmt_reset(VALUE obj)
 #endif
 
 /*	result_metadata()	*/
-static VALUE stmt_result_metadata(VALUE obj)
+static VALUE stmt_result_metadata(VALUE stmt)
 {
-    struct mysql_stmt* s = DATA_PTR(obj);
+    VALUE obj;
     MYSQL_RES *res;
-    check_stmt_closed(obj);
+    struct mysql_res *resp;
+    struct mysql_stmt* s = DATA_PTR(stmt);
+
+    check_stmt_closed(stmt);
     res = mysql_stmt_result_metadata(s->stmt);
     if (res == NULL) {
       if (mysql_stmt_errno(s->stmt) != 0)
-	mysql_stmt_raise(obj, s->stmt);
+	mysql_stmt_raise(stmt, s->stmt);
       return Qnil;
     }
-    return mysqlres2obj(res,obj);
+#ifdef M17N_SUPPORTED
+    rb_encoding *enc;
+    obj = Data_Make_Struct(cMysqlRes, struct mysql_res, 0, free_mysqlres, resp);
+    enc = get_connection_encoding_as_rb_encoding(s->handler);
+    rb_enc_set_index(obj, rb_enc_to_index(enc));
+#else
+    obj = Data_Make_Struct(cMysqlRes, struct mysql_res, 0, free_mysqlres, resp);
+#endif
+    rb_iv_set(obj, "colname", Qnil);
+    rb_iv_set(obj, "tblcolname", Qnil);
+    resp->res = res;
+    resp->freed = Qfalse;
+    rb_obj_call_init(obj, 0, NULL);
+    if (++store_result_count > GC_STORE_RESULT_LIMIT)
+	rb_gc();
+    return obj;
 }
 
 /*	row_seek(offset)	*/
